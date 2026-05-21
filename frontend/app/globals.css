@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --page-bg: #f0f2f5;
+  --surface: #ffffff;
+  --surface-2: #e8ecf1;
+  --surface-3: #dce2ea;
+  --text-primary: #0a0e17;
+  --text-secondary: #5a6578;
+  --accent: #0ea5e9;
+  --accent-glow: rgba(14, 165, 233, 0.25);
+  --border: rgba(10, 14, 23, 0.1);
+  --buy: #00c853;
+  --sell: #ff1744;
+}
+
+.dark {
+  --page-bg: #0a0c10;
+  --surface: #12151c;
+  --surface-2: #1a1f2a;
+  --surface-3: #222833;
+  --text-primary: #f0f4fc;
+  --text-secondary: #8b95a8;
+  --accent: #38bdf8;
+  --accent-glow: rgba(56, 189, 248, 0.2);
+  --border: rgba(148, 163, 184, 0.12);
+  --buy: #00e676;
+  --sell: #ff5252;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--page-bg);
+  color: var(--text-primary);
+}
+
+@layer components {
+  .surface-card {
+    @apply rounded-xl border;
+    background: var(--surface);
+    border-color: var(--border);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+  }
+
+  .accent-text {
+    color: var(--accent);
+  }
+
+  .btn-primary {
+    @apply rounded-lg px-6 py-3 text-sm font-semibold text-white transition;
+    background: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+  }
+
+  .btn-primary:hover {
+    opacity: 0.92;
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+
+  .btn-ghost {
+    @apply rounded-lg border px-4 py-2 text-sm font-medium transition;
+    border-color: var(--border);
+    color: var(--text-primary);
+  }
+
+  .btn-ghost:hover {
+    background: var(--surface-2);
+  }
+
+  .input-field {
+    @apply w-full rounded-lg border px-4 py-3 text-sm outline-none transition;
+    background: var(--surface-2);
+    border-color: var(--border);
+    color: var(--text-primary);
+  }
+
+  .input-field:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+  }
+
+  .signal-buy {
+    background: var(--buy);
+    color: white;
+  }
+
+  .signal-sell {
+    background: var(--sell);
+    color: white;
+  }
+}
+
+@keyframes marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  animation: marquee 45s linear infinite;
+}
+
+.app-grid-bg {
+  background-image: radial-gradient(
+      ellipse 80% 50% at 50% -20%,
+      var(--accent-glow),
+      transparent
+    ),
+    linear-gradient(180deg, var(--page-bg) 0%, var(--page-bg) 100%);
+}
