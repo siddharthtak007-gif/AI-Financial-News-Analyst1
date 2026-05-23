@@ -1,5 +1,3 @@
-"use client";
-
 import { AnalysisAgent } from "@/components/analysis-agent";
 import { IndiaLiveTicker } from "@/components/india-live-ticker";
 import { MarketContextSidebar } from "@/components/market-context-sidebar";

@@ -123,6 +123,11 @@ export function AnalysisAgent() {
               disabled={loading}
             />
           </div>
+          <div className="mt-2">
+  <a href="https://t.me/AiFinancialchatbot" target="_blank" rel="noopener noreferrer" className="text-sm text-blue-500 hover:text-blue-400 underline">
+    👉 Click here to start our Bot first
+  </a>
+</div>
         </div>
 
         <label className="flex cursor-pointer items-center gap-3 text-sm text-[var(--text-secondary)]">

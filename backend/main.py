@@ -4,22 +4,44 @@ import os
 import random
 import re
 import urllib.parse
+from datetime import datetime
 from typing import Any, Literal
 
-logger = logging.getLogger(__name__)
-
 import feedparser
-import google.generativeai as genai
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from google import genai
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
+# =========================================================
+# LOAD ENV
+# =========================================================
+
 load_dotenv()
 
-app = FastAPI(title="AI Financial News Analyst API", version="1.0.0")
+# =========================================================
+# LOGGER
+# =========================================================
+
+logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger(__name__)
+
+# =========================================================
+# FASTAPI
+# =========================================================
+
+app = FastAPI(
+    title="AI Financial News Analyst API",
+    version="2.0.0",
+)
+
+# =========================================================
+# CORS
+# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,590 +51,740 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# =========================================================
+# SUPABASE
+# =========================================================
 
-def _supabase() -> Client:
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
+
+def get_supabase() -> Client:
+
+    url = os.getenv("SUPABASE_URL")
+    key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_KEY")
+    )
+
     if not url or not key:
         raise HTTPException(
             status_code=500,
-            detail="Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY / SUPABASE_KEY",
+            detail="Missing Supabase credentials",
         )
+
     return create_client(url, key)
 
 
-def get_free_news(ticker: str) -> list[dict[str, str]]:
-    """Top 5 recent headlines from Google News RSS for a ticker."""
-    q = urllib.parse.quote_plus(f"{ticker} stock financial news")
+# =========================================================
+# MODELS
+# =========================================================
+
+
+class AnalyzeRequest(BaseModel):
+    ticker: str = Field(..., min_length=1, max_length=20)
+    telegram_chat_id: str | None = None
+    subscribe_alerts: bool = True
+
+
+class AlertRequest(BaseModel):
+    ticker: str
+    sentiment: Literal["Bullish", "Bearish", "Neutral"]
+    impact_score: int = Field(..., ge=1, le=10)
+    summary: str
+    telegram_chat_id: str | None = None
+    send_notification: bool = False
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+
+def clean_json(text: str) -> str:
+
+    text = text.strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text)
+        text = re.sub(r"```$", "", text)
+
+    return text.strip()
+
+
+# =========================================================
+# NEWS FETCH
+# =========================================================
+
+
+def get_news(ticker: str):
+
+    query = urllib.parse.quote_plus(
+        f"{ticker} stock market news"
+    )
+
     url = (
         "https://news.google.com/rss/search?"
-        f"q={q}&hl=en-US&gl=US&ceid=US:en"
+        f"q={query}&hl=en-US&gl=US&ceid=US:en"
     )
+
     parsed = feedparser.parse(url)
-    out: list[dict[str, str]] = []
+
+    news = []
+
     for entry in getattr(parsed, "entries", [])[:5]:
-        title = getattr(entry, "title", "") or ""
-        link = getattr(entry, "link", "") or ""
-        published = getattr(entry, "published", "") or ""
-        out.append({"title": title, "link": link, "published": published})
-    return out
+
+        news.append(
+            {
+                "title": getattr(entry, "title", ""),
+                "link": getattr(entry, "link", ""),
+                "published": getattr(entry, "published", ""),
+            }
+        )
+
+    return news
 
 
-def _strip_json_fence(text: str) -> str:
-    t = text.strip()
-    if t.startswith("```"):
-        t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
-        t = re.sub(r"\s*```$", "", t)
-    return t.strip()
+# =========================================================
+# GEMINI ANALYSIS
+# =========================================================
 
 
-def analyze_news_with_gemini(news_text: str) -> dict[str, Any]:
-    """Use Gemini to return strict JSON: sentiment, impact_score, summary."""
-    api_key = os.environ.get("GEMINI_API_KEY")
+def analyze_with_gemini(
+    news_text: str,
+    ticker: str,
+) -> dict[str, Any]:
+
+    api_key = os.getenv("GEMINI_API_KEY")
+
     if not api_key:
-        raise HTTPException(status_code=500, detail="Missing GEMINI_API_KEY")
+        raise HTTPException(
+            status_code=500,
+            detail="Missing GEMINI_API_KEY",
+        )
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        "gemini-1.5-flash",
-        generation_config={
-            "response_mime_type": "application/json",
-            "temperature": 0.35,
-        },
+    client = genai.Client(
+        api_key=api_key,
     )
 
-    prompt = f"""You are a financial news analyst. Read the headlines/snippets below and respond with ONLY valid JSON (no markdown) matching this shape:
+    prompt = f"""
+You are a professional stock market AI analyst.
+
+Analyze the stock news for ticker: {ticker}
+
+Return ONLY valid JSON in this format:
+
 {{
-  "sentiment": "Bullish" | "Bearish" | "Neutral",
-  "impact_score": <integer 1-10>,
-  "summary": "<exactly two sentences, plain text>"
+  "sentiment": "Bullish",
+  "signal": "BUY",
+  "impact_score": 8,
+  "price_movement_pct": 3.5,
+  "summary": "Two sentence summary only.",
+  "risk_level": "Medium",
+  "confidence": 87
 }}
 
-Rules:
-- sentiment must be exactly one of: Bullish, Bearish, Neutral.
-- impact_score is an integer from 1 to 10 (10 = highest potential market impact).
-- summary must be exactly two sentences.
+RULES:
+- sentiment: Bullish / Bearish / Neutral
+- signal: BUY / SELL
+- impact_score: 1-10
+- confidence: 1-100
+- summary must contain exactly 2 sentences
 
-INPUT:
+NEWS:
 {news_text}
 """
 
-    result = model.generate_content(prompt)
-    raw = getattr(result, "text", None) or ""
-    if not raw.strip():
-        raise HTTPException(status_code=502, detail="Empty response from Gemini")
-
     try:
-        data = json.loads(_strip_json_fence(raw))
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="Gemini returned non-JSON output")
 
-    sentiment = data.get("sentiment")
-    impact = data.get("impact_score")
-    summary = data.get("summary")
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
 
-    if sentiment not in ("Bullish", "Bearish", "Neutral"):
-        raise HTTPException(status_code=502, detail="Invalid sentiment from model")
-    try:
-        impact_int = int(impact)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=502, detail="Invalid impact_score from model")
-    if impact_int < 1 or impact_int > 10:
-        raise HTTPException(status_code=502, detail="impact_score out of range")
+        raw = response.text
 
-    if not isinstance(summary, str) or not summary.strip():
-        raise HTTPException(status_code=502, detail="Invalid summary from model")
+        data = json.loads(
+            clean_json(raw)
+        )
 
-    return {
-        "sentiment": sentiment,
-        "impact_score": impact_int,
-        "summary": summary.strip(),
-    }
+        return {
+            "sentiment": data.get(
+                "sentiment",
+                "Neutral",
+            ),
+            "signal": data.get(
+                "signal",
+                "BUY",
+            ),
+            "impact_score": int(
+                data.get(
+                    "impact_score",
+                    5,
+                )
+            ),
+            "price_movement_pct": float(
+                data.get(
+                    "price_movement_pct",
+                    0,
+                )
+            ),
+            "summary": data.get(
+                "summary",
+                "",
+            ),
+            "risk_level": data.get(
+                "risk_level",
+                "Medium",
+            ),
+            "confidence": int(
+                data.get(
+                    "confidence",
+                    70,
+                )
+            ),
+        }
+
+    except Exception as e:
+
+        logger.error(
+            "Gemini Error: %s",
+            e,
+        )
+
+        return {
+            "sentiment": "Neutral",
+            "signal": "BUY",
+            "impact_score": 5,
+            "price_movement_pct": 1.2,
+            "summary": "AI analysis failed. Fallback response generated.",
+            "risk_level": "Medium",
+            "confidence": 50,
+        }
 
 
-def _track_ticker(supabase: Client, ticker: str) -> tuple[bool, str | None]:
-    try:
-        supabase.table("tracked_assets").upsert(
-            {"ticker": ticker}, on_conflict="ticker"
-        ).execute()
-        return True, None
-    except Exception as exc:
-        logger.error("Failed to track ticker %s: %s", ticker, exc)
-        return False, str(exc)
+# =========================================================
+# DATABASE
+# =========================================================
 
 
-def _save_alert(
+def save_tracked_ticker(
+    supabase: Client,
+    ticker: str,
+):
+
+    supabase.table(
+        "tracked_assets"
+    ).upsert(
+        {
+            "ticker": ticker,
+        },
+        on_conflict="ticker",
+    ).execute()
+
+
+def save_alert(
     supabase: Client,
     ticker: str,
     sentiment: str,
     impact_score: int,
     summary: str,
-) -> tuple[bool, str | None]:
-    try:
-        supabase.table("alerts_history").insert(
-            {
-                "ticker": ticker,
-                "sentiment": sentiment,
-                "impact_score": impact_score,
-                "summary": summary,
-            }
-        ).execute()
-        return True, None
-    except Exception as exc:
-        logger.error("Failed to save alert for %s: %s", ticker, exc)
-        return False, str(exc)
+):
 
-
-def notify_via_n8n(payload: dict[str, Any]) -> bool:
-    """POST analysis alert to n8n webhook (Telegram delivery handled in n8n)."""
-    webhook_url = os.environ.get("N8N_WEBHOOK_URL", "").strip()
-    if not webhook_url:
-        logger.warning("N8N_WEBHOOK_URL not set; skipping notification")
-        return False
-
-    try:
-        resp = requests.post(webhook_url, json=payload, timeout=30)
-        if resp.status_code >= 400:
-            logger.error(
-                "n8n webhook failed: status=%s body=%s",
-                resp.status_code,
-                resp.text[:500],
-            )
-            return False
-        return True
-    except requests.RequestException as exc:
-        logger.error("n8n webhook request error: %s", exc)
-        return False
-
-
-class AnalyzeRequest(BaseModel):
-    ticker: str = Field(..., min_length=1, max_length=32)
-    telegram_chat_id: str | None = Field(default=None, max_length=64)
-    subscribe_alerts: bool = Field(
-        default=True,
-        description="When true and chat_id is set, send n8n notification if impact >= 7",
-    )
-
-
-class AlertCreateRequest(BaseModel):
-    ticker: str = Field(..., min_length=1, max_length=32)
-    sentiment: Literal["Bullish", "Bearish", "Neutral"]
-    impact_score: int = Field(..., ge=1, le=10)
-    summary: str = Field(..., min_length=1, max_length=2000)
-    telegram_chat_id: str | None = Field(default=None, max_length=64)
-    send_notification: bool = Field(default=False)
-
-
-def analyze_stock_full(ticker: str) -> dict[str, Any]:
-    """Extended Gemini analysis for STOCK EDGE dashboard."""
-    news = get_free_news(ticker)
-    if not news:
-        raise HTTPException(status_code=404, detail=f"No news found for {ticker}")
-
-    blob = "\n".join(f"- {n['title']} ({n.get('published', '')})" for n in news)
-    api_key = os.environ.get("GEMINI_API_KEY")
-
-    if not api_key:
-        sentiment = random.choice(["Bullish", "Bearish"])
-        signal = "BUY" if sentiment == "Bullish" else "SELL"
-        movement = round(random.uniform(1.2, 5.5), 1) * (1 if signal == "BUY" else -1)
-        return {
-            "ticker": ticker.upper(),
-            "signal": signal,
+    supabase.table(
+        "alerts_history"
+    ).insert(
+        {
+            "ticker": ticker,
             "sentiment": sentiment,
-            "price_movement_pct": movement,
-            "impact_score": random.randint(6, 9),
-            "summary": (
-                f"Simulated analysis for {ticker.upper()}: sentiment appears {sentiment.lower()} "
-                "based on recent headline tone. Configure GEMINI_API_KEY for live AI output."
-            ),
-            "news_items": [
-                {"title": n["title"], "impact": random.randint(5, 9)} for n in news[:4]
-            ],
-            "demo": True,
+            "impact_score": impact_score,
+            "summary": summary,
+            "created_at": datetime.utcnow().isoformat(),
         }
+    ).execute()
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        "gemini-1.5-flash",
-        generation_config={
-            "response_mime_type": "application/json",
-            "temperature": 0.35,
-        },
-    )
 
-    prompt = f"""You are a financial news analyst. Analyze these headlines for ticker {ticker}.
-Respond with ONLY valid JSON:
-{{
-  "sentiment": "Bullish" | "Bearish" | "Neutral",
-  "signal": "BUY" | "SELL",
-  "price_movement_pct": <float, e.g. 3.5 or -2.1>,
-  "impact_score": <integer 1-10>,
-  "summary": "<two sentences>",
-  "news_items": [
-    {{"title": "<headline>", "impact": <integer 1-10>}}
-  ]
-}}
+# =========================================================
+# TELEGRAM / N8N
+# =========================================================
 
-Rules:
-- signal: BUY if Bullish, SELL if Bearish, BUY or SELL if Neutral (pick stronger lean).
-- price_movement_pct: estimated % move, positive for BUY bias, negative for SELL.
-- news_items: 3-5 items from the headlines with impact scores.
 
-HEADLINES:
-{blob}
-"""
+def send_n8n_notification(
+    payload: dict[str, Any],
+) -> bool:
 
-    result = model.generate_content(prompt)
-    raw = getattr(result, "text", None) or ""
-    try:
-        data = json.loads(_strip_json_fence(raw))
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="Gemini returned non-JSON output")
+    webhook = os.getenv(
+        "N8N_WEBHOOK_URL",
+        "",
+    ).strip()
 
-    sentiment = data.get("sentiment", "Neutral")
-    signal = data.get("signal", "BUY" if sentiment == "Bullish" else "SELL")
-    if signal not in ("BUY", "SELL"):
-        signal = "BUY" if sentiment != "Bearish" else "SELL"
+    if not webhook:
+        logger.warning(
+            "Missing N8N_WEBHOOK_URL"
+        )
+        return False
 
     try:
-        movement = float(data.get("price_movement_pct", 0))
-    except (TypeError, ValueError):
-        movement = 2.5 if signal == "BUY" else -2.5
 
-    news_items = data.get("news_items") or [
-        {"title": n["title"], "impact": 7} for n in news[:4]
-    ]
+        response = requests.post(
+            webhook,
+            json=payload,
+            timeout=30,
+        )
 
-    return {
-        "ticker": ticker.upper(),
-        "signal": signal,
-        "sentiment": sentiment,
-        "price_movement_pct": round(movement, 1),
-        "impact_score": int(data.get("impact_score", 7)),
-        "summary": str(data.get("summary", "")).strip(),
-        "news_items": news_items[:6],
-        "demo": False,
-    }
+        return response.status_code < 400
+
+    except Exception as e:
+
+        logger.error(
+            "n8n Error: %s",
+            e,
+        )
+
+        return False
 
 
-def _sim_market_rows(symbols: list[tuple[str, float, float]]) -> list[dict[str, Any]]:
+# =========================================================
+# MARKET SIMULATOR
+# =========================================================
+
+
+def market_rows(
+    items: list[tuple[str, float, float]]
+):
+
     rows = []
-    for sym, base, vol in symbols:
-        chg = round(random.uniform(-vol, vol), 2)
-        price = round(base * (1 + chg / 100), 2)
+
+    for symbol, base_price, volatility in items:
+
+        change = round(
+            random.uniform(
+                -volatility,
+                volatility,
+            ),
+            2,
+        )
+
+        current_price = round(
+            base_price * (1 + change / 100),
+            2,
+        )
+
         rows.append(
             {
-                "symbol": sym,
-                "price": price,
-                "change_pct": chg,
-                "volume": random.randint(1_000_000, 50_000_000),
+                "symbol": symbol,
+                "price": current_price,
+                "change_pct": change,
+                "volume": random.randint(
+                    1000000,
+                    50000000,
+                ),
             }
         )
+
     return rows
 
 
+# =========================================================
+# ROOT
+# =========================================================
+
+
+@app.get("/")
+def root():
+
+    return {
+        "message": "AI Financial News Analyst API Running",
+        "version": "2.0.0",
+    }
+
+
+# =========================================================
+# HEALTH
+# =========================================================
+
+
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health():
+
+    return {
+        "status": "ok",
+    }
+
+
+# =========================================================
+# ANALYZE STOCK
+# =========================================================
 
 
 @app.post("/api/analyze")
-def analyze_stock(req: AnalyzeRequest) -> dict[str, Any]:
-    ticker = req.ticker.strip().upper()
+def analyze_stock(
+    req: AnalyzeRequest,
+):
+
+    ticker = req.ticker.upper().strip()
+
     if not ticker:
-        raise HTTPException(status_code=400, detail="Invalid ticker")
-
-    result = analyze_stock_full(ticker)
-
-    tracked_status = "skipped"
-    alert_status = "skipped"
-    track_error: str | None = None
-    alert_error: str | None = None
-
-    try:
-        supabase = _supabase()
-        track_ok, track_error = _track_ticker(supabase, ticker)
-        tracked_status = "saved" if track_ok else "failed"
-
-        if result["impact_score"] >= 7:
-            alert_ok, alert_error = _save_alert(
-                supabase,
-                ticker,
-                result["sentiment"],
-                result["impact_score"],
-                result["summary"],
-            )
-            alert_status = "saved" if alert_ok else "failed"
-        else:
-            alert_status = "skipped_low_impact"
-    except HTTPException as exc:
-        tracked_status = "failed"
-        alert_status = "failed"
-        track_error = str(exc.detail)
-        logger.warning("Supabase unavailable during analyze: %s", exc.detail)
-
-    chat_id = (req.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
-    telegram_status = "skipped"
-    should_notify = (
-        req.subscribe_alerts
-        and bool(chat_id)
-        and result["impact_score"] >= 7
-    )
-    if should_notify:
-        sent = notify_via_n8n(
-            {
-                "ticker": ticker,
-                "signal": result["signal"],
-                "sentiment": result["sentiment"],
-                "price_movement_pct": result["price_movement_pct"],
-                "summary": result["summary"],
-                "telegram_chat_id": chat_id,
-            }
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid ticker",
         )
-        telegram_status = "sent" if sent else "n8n_failed"
-    elif req.subscribe_alerts and chat_id and result["impact_score"] < 7:
-        telegram_status = "skipped_low_impact"
-    elif req.subscribe_alerts and not chat_id:
-        telegram_status = "skipped_no_chat_id"
 
-    return {
-        "success": True,
-        **result,
-        "tracked_status": tracked_status,
-        "alert_status": alert_status,
-        "telegram_status": telegram_status,
-        "errors": {
-            k: v
-            for k, v in {
-                "track": track_error,
-                "alert": alert_error,
-            }.items()
-            if v
-        },
-    }
+    news = get_news(ticker)
 
+    if not news:
+        raise HTTPException(
+            status_code=404,
+            detail="No news found",
+        )
 
-@app.post("/api/alerts")
-def create_alert(req: AlertCreateRequest) -> dict[str, Any]:
-    """Manually add an alert to alerts_history and optionally notify via n8n."""
-    ticker = req.ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="Invalid ticker")
+    news_blob = "\n".join(
+        [
+            f"- {item['title']}"
+            for item in news
+        ]
+    )
 
-    alert_status = "skipped"
-    alert_error: str | None = None
-    tracked_status = "skipped"
+    analysis = analyze_with_gemini(
+        news_blob,
+        ticker,
+    )
 
+    # SAVE DATABASE
     try:
-        supabase = _supabase()
-        track_ok, track_err = _track_ticker(supabase, ticker)
-        tracked_status = "saved" if track_ok else "failed"
-        if track_err:
-            alert_error = track_err
 
-        alert_ok, save_err = _save_alert(
+        supabase = get_supabase()
+
+        save_tracked_ticker(
             supabase,
             ticker,
-            req.sentiment,
-            req.impact_score,
-            req.summary.strip(),
         )
-        alert_status = "saved" if alert_ok else "failed"
-        if save_err:
-            alert_error = save_err
-    except HTTPException as exc:
-        raise exc
-    except Exception as exc:
-        logger.error("create_alert failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    telegram_status = "skipped"
-    chat_id = (req.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
-    if req.send_notification and chat_id:
-        signal = (
-            "BUY"
-            if req.sentiment == "Bullish"
-            else "SELL"
-            if req.sentiment == "Bearish"
-            else "BUY"
-        )
-        movement = round((req.impact_score - 5) * 0.8, 1)
-        sent = notify_via_n8n(
-            {
-                "ticker": ticker,
-                "signal": signal,
-                "sentiment": req.sentiment,
-                "price_movement_pct": movement,
-                "summary": req.summary.strip(),
-                "telegram_chat_id": chat_id,
-            }
-        )
-        telegram_status = "sent" if sent else "n8n_failed"
-    elif req.send_notification and not chat_id:
-        telegram_status = "skipped_no_chat_id"
-
-    return {
-        "success": alert_status == "saved",
-        "ticker": ticker,
-        "alert_status": alert_status,
-        "tracked_status": tracked_status,
-        "telegram_status": telegram_status,
-        "error": alert_error,
-    }
-
-
-@app.get("/api/markets/{region}")
-def markets_dashboard(region: Literal["india", "global"]) -> dict[str, Any]:
-    if region == "india":
-        indices = _sim_market_rows(
-            [
-                ("NIFTY 50", 22405, 1.2),
-                ("SENSEX", 73800, 1.0),
-                ("BANK NIFTY", 47850, 1.5),
-                ("NIFTY IT", 35200, 1.8),
-            ]
-        )
-        stocks = _sim_market_rows(
-            [
-                ("RELIANCE", 2950, 1.4),
-                ("TCS", 3850, 0.9),
-                ("HDFCBANK", 1680, 1.1),
-                ("INFY", 1520, 1.0),
-                ("ICICIBANK", 1120, 1.3),
-                ("SBIN", 780, 1.6),
-            ]
-        )
-        return {"region": "india", "title": "NSE/BSE (India Overview)", "indices": indices, "stocks": stocks}
-
-    indices = _sim_market_rows(
-        [
-            ("S&P 500", 5280, 0.8),
-            ("NASDAQ", 16850, 1.1),
-            ("DOW", 39200, 0.7),
-            ("FTSE 100", 8120, 0.6),
-            ("DAX", 18200, 0.9),
-            ("NIKKEI", 39800, 1.0),
-        ]
-    )
-    stocks = _sim_market_rows(
-        [
-            ("AAPL", 189.5, 1.0),
-            ("MSFT", 412.0, 0.8),
-            ("NVDA", 118.7, 2.0),
-            ("GOOGL", 168.9, 0.9),
-            ("AMZN", 178.5, 1.1),
-            ("TSLA", 241.3, 1.8),
-        ]
-    )
-    return {
-        "region": "global",
-        "title": "Major Global Indices",
-        "indices": indices,
-        "stocks": stocks,
-    }
-
-
-@app.get("/api/ticker/india")
-def india_live_ticker() -> dict[str, Any]:
-    items = _sim_market_rows(
-        [
-            ("NIFTY 50", 22405, 0.9),
-            ("SENSEX", 73800, 0.95),
-            ("RELIANCE", 2950, 1.2),
-            ("TCS", 3850, 0.8),
-            ("HDFCBANK", 1680, 1.0),
-            ("INFY", 1520, 0.7),
-            ("ICICIBANK", 1120, 1.1),
-            ("SBIN", 780, 1.4),
-            ("BHARTIARTL", 1180, 0.9),
-            ("ITC", 445, 0.6),
-        ]
-    )
-    return {"items": items}
-
-
-@app.get("/api/run-hourly-scan")
-def run_hourly_scan() -> dict[str, Any]:
-    """
-    Fetch tracked tickers, pull news, analyze with Gemini.
-    If impact_score >= 7, persist alert and notify via n8n webhook.
-    """
-    supabase = _supabase()
-
-    tickers_rows = supabase.table("tracked_assets").select("ticker").execute()
-    rows = tickers_rows.data or []
-    tickers = [r["ticker"] for r in rows if r.get("ticker")]
-
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-    processed: list[dict[str, Any]] = []
-
-    for ticker in tickers:
-        news = get_free_news(ticker)
-        if not news:
-            processed.append({"ticker": ticker, "status": "no_news"})
-            continue
-
-        blob = "\n".join(
-            f"- {n['title']} ({n.get('published', '')})" for n in news
-        )
-        analysis = analyze_news_with_gemini(blob)
-
-        item = {
-            "ticker": ticker,
-            "sentiment": analysis["sentiment"],
-            "impact_score": analysis["impact_score"],
-            "headlines_count": len(news),
-        }
-
-        if analysis["impact_score"] >= 7:
-            alert_ok, alert_err = _save_alert(
+        save_alert(
                 supabase,
                 ticker,
                 analysis["sentiment"],
                 analysis["impact_score"],
                 analysis["summary"],
             )
-            if not alert_ok:
-                item["alert_error"] = alert_err
-                item["status"] = "alert_save_failed"
-            else:
-                item["status"] = "alert_saved"
 
-            if chat_id and alert_ok:
-                sentiment = analysis["sentiment"]
-                signal = (
-                    "BUY"
-                    if sentiment == "Bullish"
-                    else "SELL"
-                    if sentiment == "Bearish"
-                    else "BUY"
-                )
-                sent = notify_via_n8n(
-                    {
-                        "ticker": ticker,
-                        "signal": signal,
-                        "sentiment": sentiment,
-                        "price_movement_pct": round(
-                            (analysis["impact_score"] - 5) * 0.8, 1
-                        ),
-                        "summary": analysis["summary"],
-                        "telegram_chat_id": chat_id,
-                    }
-                )
-                item["telegram"] = "sent" if sent else "n8n_failed"
-            elif not chat_id:
-                item["telegram"] = "skipped_missing_chat_id"
-            else:
-                item["telegram"] = "skipped_alert_failed"
-        else:
-            item["status"] = "below_threshold"
+    except Exception as e:
 
-        processed.append(item)
+        logger.error(
+            "Database Error: %s",
+            e,
+        )
+
+    # TELEGRAM ALERT
+    telegram_status = ""
+
+    chat_id = (
+        req.telegram_chat_id
+        or os.getenv(
+             "TELEGRAM_CHAT_ID",
+            "",
+    )
+    ).strip()
+
+    # SEND ALL SIGNALS (NO IMPACT SCORE FILTER)
+    if req.subscribe_alerts and chat_id:
+
+        sent = send_n8n_notification(
+        {
+            "ticker": ticker,
+            "signal": analysis["signal"],
+            "sentiment": analysis["sentiment"],
+            "impact_score": analysis["impact_score"],
+            "summary": analysis["summary"],
+            "telegram_chat_id": chat_id,
+        }
+    )
+
+    telegram_status = (
+            "sent"
+             if sent
+             else "failed"
+    )
 
     return {
         "success": True,
-        "scanned": len(tickers),
-        "results": processed,
+        "ticker": ticker,
+        **analysis,
+        "news": news,
+        "telegram_status": telegram_status,
     }
+
+
+# =========================================================
+# CREATE ALERT
+# =========================================================
+
+
+@app.post("/api/alerts")
+def create_alert(
+    req: AlertRequest,
+):
+
+    ticker = req.ticker.upper().strip()
+
+    try:
+
+        supabase = get_supabase()
+
+        save_alert(
+            supabase,
+            ticker,
+            req.sentiment,
+            req.impact_score,
+            req.summary,
+        )
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e),
+        )
+
+    telegram_status = "skipped"
+
+    if req.send_notification:
+
+        chat_id = (
+            req.telegram_chat_id
+            or os.getenv(
+                "TELEGRAM_CHAT_ID",
+                "",
+            )
+        ).strip()
+
+        if chat_id:
+
+            signal = (
+                "BUY"
+                if req.sentiment == "Bullish"
+                else "SELL"
+            )
+
+            sent = send_n8n_notification(
+                {
+                    "ticker": ticker,
+                    "signal": signal,
+                    "sentiment": req.sentiment,
+                    "impact_score": req.impact_score,
+                    "summary": req.summary,
+                    "telegram_chat_id": chat_id,
+                }
+            )
+
+            telegram_status = (
+                "sent"
+                if sent
+                else "failed"
+            )
+
+    return {
+        "success": True,
+        "telegram_status": telegram_status,
+    }
+
+
+# =========================================================
+# MARKETS API
+# =========================================================
+
+
+@app.get("/api/markets/{region}")
+def markets(
+    region: Literal[
+        "india",
+        "global",
+    ]
+):
+
+    if region == "india":
+
+        indices = market_rows(
+            [
+                ("NIFTY 50", 22400, 1.2),
+                ("SENSEX", 73800, 1.0),
+                ("BANK NIFTY", 47800, 1.5),
+            ]
+        )
+
+        stocks = market_rows(
+            [
+                ("RELIANCE", 2950, 1.3),
+                ("TCS", 3850, 1.0),
+                ("INFY", 1520, 1.1),
+                ("SBIN", 780, 1.4),
+            ]
+        )
+
+        return {
+            "region": "india",
+            "indices": indices,
+            "stocks": stocks,
+        }
+
+    indices = market_rows(
+        [
+            ("S&P 500", 5280, 0.8),
+            ("NASDAQ", 16850, 1.0),
+            ("DOW JONES", 39200, 0.7),
+        ]
+    )
+
+    stocks = market_rows(
+        [
+            ("AAPL", 189, 1.1),
+            ("MSFT", 412, 0.9),
+            ("NVDA", 118, 2.0),
+        ]
+    )
+
+    return {
+        "region": "global",
+        "indices": indices,
+        "stocks": stocks,
+    }
+
+
+# =========================================================
+# INDIA LIVE TICKER
+# =========================================================
+
+
+@app.get("/api/ticker/india")
+def india_ticker():
+
+    items = market_rows(
+        [
+            ("NIFTY 50", 22400, 0.9),
+            ("SENSEX", 73800, 0.8),
+            ("RELIANCE", 2950, 1.0),
+            ("TCS", 3850, 0.7),
+            ("INFY", 1520, 0.9),
+            ("SBIN", 780, 1.2),
+        ]
+    )
+
+    return {
+        "items": items,
+    }
+
+
+# =========================================================
+# RUN HOURLY SCAN
+# =========================================================
+
+
+@app.get("/api/run-hourly-scan")
+def run_hourly_scan():
+
+    supabase = get_supabase()
+
+    rows = (
+        supabase.table(
+            "tracked_assets"
+        )
+        .select("ticker")
+        .execute()
+    )
+
+    tickers = [
+        row["ticker"]
+        for row in rows.data
+    ]
+
+    results = []
+
+    for ticker in tickers:
+
+        try:
+
+            news = get_news(ticker)
+
+            if not news:
+                continue
+
+            news_blob = "\n".join(
+                [
+                    item["title"]
+                    for item in news
+                ]
+            )
+
+            analysis = analyze_with_gemini(
+                news_blob,
+                ticker,
+            )
+
+            save_alert(
+                    supabase,
+                    ticker,
+                    analysis["sentiment"],
+                    analysis["impact_score"],
+                    analysis["summary"],
+                )
+
+            chat_id = os.getenv(
+                "TELEGRAM_CHAT_ID",
+                "",
+            ).strip()
+
+# SEND ALL SIGNALS (NO IMPACT SCORE FILTER)
+            if chat_id:
+
+                 send_n8n_notification(
+                     {
+                    "ticker": ticker,
+                    "signal": analysis["signal"],
+                    "sentiment": analysis["sentiment"],
+                    "impact_score": analysis["impact_score"],
+                    "summary": analysis["summary"],
+                    "telegram_chat_id": chat_id,
+        }
+    )
+
+            results.append(
+                {
+                    "ticker": ticker,
+                    "status": "processed",
+                    "impact_score": analysis[
+                        "impact_score"
+                    ],
+                }
+            )
+
+        except Exception as e:
+
+            logger.error(
+                "Hourly Scan Error: %s",
+                e,
+            )
+
+            results.append(
+                {
+                    "ticker": ticker,
+                    "status": "failed",
+                }
+            )
+
+    return {
+        "success": True,
+        "results": results,
+    }
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+if __name__ == "__main__":
+
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+    )
