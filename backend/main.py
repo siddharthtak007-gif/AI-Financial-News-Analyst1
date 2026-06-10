@@ -13,7 +13,7 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
+import google.generativeai as genai
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
