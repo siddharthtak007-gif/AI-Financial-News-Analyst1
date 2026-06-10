@@ -161,9 +161,8 @@ def analyze_with_gemini(
             detail="Missing GEMINI_API_KEY",
         )
 
-    client = genai.Client(
-        api_key=api_key,
-    )
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY")  
+                     model = genai.GenerativeModel('gemini-1.5-flash')
 
     prompt = f"""
 You are a professional stock market AI analyst.
