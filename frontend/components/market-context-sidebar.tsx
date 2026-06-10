@@ -135,13 +135,13 @@ export function MarketContextSidebar() {
       }
     }
     void load();
-    const id = setInterval(load, 30000);
-    const onAnalysis = () => void load();
-    window.addEventListener("stockedge-analysis-complete", onAnalysis);
-    return () => {
-      clearInterval(id);
-      window.removeEventListener("stockedge-analysis-complete", onAnalysis);
-    };
+    // const id = setInterval(load, 30000);
+    // const onAnalysis = () => void load();
+    // window.addEventListener("stockedge-analysis-complete", onAnalysis);
+    // return () => {
+    //   clearInterval(id);
+    //   window.removeEventListener("stockedge-analysis-complete", onAnalysis);
+    // };
   }, []);
 
   if (loading) {

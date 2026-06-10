@@ -122,7 +122,8 @@ export function MarketsDashboard({ region }: { region: "india" | "global" }) {
       }
     }
     void load();
-    const id = setInterval(load, 20000);
+    // INTERVAL CHANGED TO 300000ms (5 minutes)
+    const id = setInterval(load, 300000);
     return () => clearInterval(id);
   }, [region]);
 

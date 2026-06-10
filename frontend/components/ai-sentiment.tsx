@@ -32,7 +32,6 @@ function SkeletonBar() {
 
 function SentimentRowView({ row }: { row: SentimentRow }) {
   const bullish = row.sentiment === "Bullish";
-  const widthClass = `w-[${row.confidence}%]`;
 
   return (
     <div className="space-y-2">
@@ -44,7 +43,8 @@ function SentimentRowView({ row }: { row: SentimentRow }) {
       </div>
       <div className="h-2 w-full rounded-full bg-gray-800">
         <div
-          className={`h-2 rounded-full bg-gradient-to-r from-[#00c853] to-[#00e5ff] transition-all duration-1000 ease-in-out ${widthClass}`}
+          className="h-2 rounded-full bg-gradient-to-r from-[#00c853] to-[#00e5ff] transition-all duration-1000 ease-in-out"
+          style={{ width: `${row.confidence}%` }}
         />
       </div>
       <p className="text-xs text-[var(--text-secondary)]">
@@ -74,12 +74,12 @@ export default function AISentiment() {
     }
   };
 
+  // FIX 1: Removed setInterval so it only fetches data once on component mount
   useEffect(() => {
     void fetchSentiment();
-    const id = window.setInterval(() => void fetchSentiment(), 60_000);
-    return () => window.clearInterval(id);
   }, []);
 
+  // Simulates live jitter on the existing data without making new API calls
   useEffect(() => {
     const id = window.setInterval(() => {
       setRows((prev) =>

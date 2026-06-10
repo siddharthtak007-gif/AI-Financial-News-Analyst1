@@ -124,7 +124,7 @@ export function AnalysisAgent() {
             />
           </div>
           <div className="mt-2">
-  <a href="https://t.me/AiFinancialchatbot" target="_blank" rel="noopener noreferrer" className="text-sm text-blue-500 hover:text-blue-400 underline">
+  <a href="https://t.me/Financial1chatbot" target="_blank" rel="noopener noreferrer" className="text-sm text-blue-500 hover:text-blue-400 underline">
     👉 Click here to start our Bot first
   </a>
 </div>
@@ -140,7 +140,7 @@ export function AnalysisAgent() {
           />
           <span>
             <span className="font-medium text-[var(--text-primary)]">Enable Telegram alerts</span>
-            {" "}(via n8n when impact score ≥ 7)
+            {" "}
           </span>
         </label>
 

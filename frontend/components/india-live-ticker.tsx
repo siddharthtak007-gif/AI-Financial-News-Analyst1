@@ -54,7 +54,8 @@ export function IndiaLiveTicker() {
       }
     }
     void load();
-    const id = setInterval(load, 15000);
+    // Changed polling interval from 15 seconds (15000) to 5 minutes (300000) to prevent API rate limits
+    const id = setInterval(load, 300000);
     return () => clearInterval(id);
   }, []);
 
