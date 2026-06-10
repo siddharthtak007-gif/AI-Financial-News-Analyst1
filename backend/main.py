@@ -6,6 +6,7 @@ import re
 import urllib.parse
 from datetime import datetime
 from typing import Any, Literal
+import time
 
 import feedparser
 import requests
@@ -18,9 +19,9 @@ from supabase import Client, create_client
 
 # =========================================================
 # LOAD ENV
-# =========================================================
+# ========================================================
 
-load_dotenv()
+load_dotenv(override=True)
 
 # =========================================================
 # LOGGER
@@ -195,7 +196,7 @@ NEWS:
     try:
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
 
@@ -699,6 +700,8 @@ def run_hourly_scan():
     for ticker in tickers:
 
         try:
+     
+            time.sleep(6)
 
             news = get_news(ticker)
 
