@@ -162,7 +162,7 @@ def analyze_with_gemini(
         )
 
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
     prompt = f"""
 You are a professional stock market AI analyst.
